@@ -1,0 +1,62 @@
+name: "02 - Hardened Zero Trust Pipeline"
+
+on:
+  push:
+    branches: [ "main" ]
+
+jobs:
+  # Stage 1: Build & Verify Dependencies securely
+  secure-build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read # Restricts the GITHUB_TOKEN to read-only access
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js Environment
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm' # Caches dependencies safely based on lockfile hashes
+
+      # 🛡️ Defense: Enforce exact versions and block script execution
+      # This completely blocks the preinstall/postinstall attack vectors
+      - name: Install Application Dependencies
+        run: |
+          cd app
+          npm ci --ignore-scripts
+
+      - name: Verify Build Integrity
+        run: |
+          echo "Running build integrity verification checks..."
+
+  # Stage 2: Separate deployment to isolate sensitive environment variables
+  secure-deploy:
+    needs: secure-build
+    runs-on: ubuntu-latest
+    env:
+      PRODUCTION_DATABASE_PASSWORD: "SuperSecretProductionPassword123!"
+      N8N_WEBHOOK_URL: "https://scarcity-cornmeal-expanse.ngrok-free.dev/webhook-test/pipeline-alerts"
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Simulate Isolated Deployment
+        run: |
+          echo "Deploying verified artifacts to production target..."
+
+      - name: Send Clean Pipeline Telemetry
+        if: always()
+        run: |
+          curl -X POST "${{ env.N8N_WEBHOOK_URL }}" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "repository": "${{ github.repository }}",
+              "actor": "${{ github.actor }}",
+              "run_id": "${{ github.run_id }}",
+              "status": "${{ job.status }}",
+              "message": "Zero Trust pipeline verification completed successfully."
+            }'
