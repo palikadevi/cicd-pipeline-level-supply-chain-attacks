@@ -18,11 +18,11 @@ jobs:
       - name: Setup Node.js Environment
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
-          cache: 'npm' # Caches dependencies safely based on lockfile hashes
+          node-version: '22' # Upgraded to 22 to clear the Node 20 deprecation warning
+          cache: 'npm'
+          cache-dependency-path: app/package-lock.json # 🛡️ FIX: Tells GitHub exactly where the lockfile is
 
       # 🛡️ Defense: Enforce exact versions and block script execution
-      # This completely blocks the preinstall/postinstall attack vectors
       - name: Install Application Dependencies
         run: |
           cd app
