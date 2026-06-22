@@ -11,7 +11,7 @@ jobs:
     env:
       PRODUCTION_DATABASE_PASSWORD: "SuperSecretProductionPassword123!"
       # ⚡ Your live ngrok bridge link:
-      N8N_WEBHOOK_URL: "https://scarcity-cornmeal-expanse.ngrok-free.dev/webhook-test/pipeline-alerts"
+      N8N_WEBHOOK_URL: "https://scarcity-cornmeal-expanse.ngrok-free.dev/webhook/pipeline-alerts"
 
     steps:
       - name: Checkout Code
