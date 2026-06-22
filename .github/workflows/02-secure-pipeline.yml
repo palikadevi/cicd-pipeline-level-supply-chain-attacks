@@ -43,7 +43,7 @@ jobs:
       N8N_WEBHOOK_URL: "https://scarcity-cornmeal-expanse.ngrok-free.dev/webhook/pipeline-alerts"
 
     steps:
-      - name: Checkout Code
+      - name: Checkout Code 
         uses: actions/checkout@v4
 
       - name: Simulate Isolated Deployment
