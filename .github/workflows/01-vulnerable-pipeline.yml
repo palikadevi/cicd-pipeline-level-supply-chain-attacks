@@ -33,7 +33,7 @@ jobs:
 
       # ⚡ Sends real-time telemetry back to your local n8n container
       - name: Send Pipeline Status Webhook
-        if: always() # Ensures this runs even if the build crashes
+        if: always() 
         run: |
           curl -X POST "${{ env.N8N_WEBHOOK_URL }}" \
             -H "Content-Type: application/json" \
