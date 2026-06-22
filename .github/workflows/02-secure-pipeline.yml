@@ -33,12 +33,14 @@ jobs:
           echo "Running build integrity verification checks..."
 
   # Stage 2: Separate deployment to isolate sensitive environment variables
+  # Stage 2: Separate deployment to isolate sensitive environment variables
   secure-deploy:
     needs: secure-build
     runs-on: ubuntu-latest
     env:
       PRODUCTION_DATABASE_PASSWORD: "SuperSecretProductionPassword123!"
-      N8N_WEBHOOK_URL: "https://scarcity-cornmeal-expanse.ngrok-free.dev/webhook-test/pipeline-alerts"
+      # 🚨 UPDATE THIS LINE: Change /webhook-test/ to /webhook/
+      N8N_WEBHOOK_URL: "https://scarcity-cornmeal-expanse.ngrok-free.dev/webhook/pipeline-alerts"
 
     steps:
       - name: Checkout Code
