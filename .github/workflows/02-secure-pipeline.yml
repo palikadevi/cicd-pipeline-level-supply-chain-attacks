@@ -40,7 +40,7 @@ jobs:
     env:
       PRODUCTION_DATABASE_PASSWORD: "SuperSecretProductionPassword123!"
       # 🚨 PASTE THE EXACT PRODUCTION URL YOU COPIED FROM THE WEBHOOK NODE HERE:
-      N8N_WEBHOOK_URL: "http://localhost:5678/webhook/pipeline-alerts"
+      N8N_WEBHOOK_URL: "https://YOUR-CURRENT-NGROK-URL.ngrok-free.dev/webhook/pipeline-alerts"
 
     steps:
       - name: Checkout Code 
