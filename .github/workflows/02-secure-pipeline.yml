@@ -62,7 +62,6 @@ jobs:
         if: steps.build_step.outcome == 'success'
         id: docker_build
         run: |
-          # Convert repository name to lowercase for Docker compatibility
           REPO_LOWERCASE=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
           IMAGE_NAME="ghcr.io/$REPO_LOWERCASE/secure-app"
           IMAGE_TAG="${{ github.sha }}"
@@ -71,26 +70,64 @@ jobs:
           docker build -t $IMAGE_NAME:$IMAGE_TAG .
           docker push $IMAGE_NAME:$IMAGE_TAG
           
-          # Extract the exact cryptographic digest for Zero Trust signing
           IMAGE_DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' $IMAGE_NAME:$IMAGE_TAG)
           echo "IMAGE_DIGEST=$IMAGE_DIGEST" >> $GITHUB_ENV
 
       - name: Cryptographically Sign Software Artifact
         if: steps.build_step.outcome == 'success'
         run: |
-          # Keyless signing via GitHub OIDC token
           cosign sign --yes ${{ env.IMAGE_DIGEST }}
           echo "✅ Provenance Artifact Successfully Signed and Pushed to GHCR!"
 
   secure-deploy:
     needs: secure-build
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      packages: read
     steps:
+      - name: Install Sigstore Cosign
+        uses: sigstore/cosign-installer@v3.5.0
+
+      - name: Verify Artifact Provenance (Admission Control Gate)
+        id: admission_gate
+        run: |
+          REPO_LOWERCASE=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          IMAGE_NAME="ghcr.io/$REPO_LOWERCASE/secure-app"
+          IMAGE_TAG="${{ github.sha }}"
+          
+          echo "🛡️ Admission Control: Verifying signature identity for $IMAGE_NAME:$IMAGE_TAG..."
+          
+          # Enforce keyless OIDC verification against your GitHub profile
+          cosign verify \
+            --certificate-identity-regexp "https://github.com/${{ github.repository_owner }}/.*" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            $IMAGE_NAME:$IMAGE_TAG
+            
+          echo "✅ Verification successful. Artifact matches signed provenance trail."
+        continue-on-error: true
+
+      - name: Block Unverified Deployment & Trigger Telemetry Alert
+        if: steps.admission_gate.outcome == 'failure'
+        run: |
+          curl -X POST "${{ secrets.N8N_WEBHOOK_URL }}" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "status": "failed",
+              "reason": "Admission Control Blocked Deployment: Artifact signature validation failed or was missing.",
+              "run_id": "${{ github.run_id }}",
+              "timestamp": "'$(date -u +%Y-%m-%dT%H:%M:%SZ)'"
+            }'
+          echo "❌ ADMISSION CONTROL EXCEPTION: Deployment blocked due to identity validation failure."
+          exit 1
+
       - name: Execute Isolated Secure Deployment Route
+        if: steps.admission_gate.outcome == 'success'
         run: |
           echo "🚀 Deploying secure software image..."
 
       - name: Transmit Final Success Telemetry to Dashboard
+        if: steps.admission_gate.outcome == 'success'
         run: |
           curl -X POST "${{ secrets.N8N_WEBHOOK_URL }}" \
             -H "Content-Type: application/json" \
