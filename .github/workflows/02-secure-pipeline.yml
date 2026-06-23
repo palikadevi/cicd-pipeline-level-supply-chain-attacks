@@ -50,11 +50,37 @@ jobs:
         if: steps.build_step.outcome == 'success'
         uses: sigstore/cosign-installer@v3.5.0
 
+      - name: Log in to GitHub Container Registry
+        if: steps.build_step.outcome == 'success'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and Push Container Image
+        if: steps.build_step.outcome == 'success'
+        id: docker_build
+        run: |
+          # Convert repository name to lowercase for Docker compatibility
+          REPO_LOWERCASE=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          IMAGE_NAME="ghcr.io/$REPO_LOWERCASE/secure-app"
+          IMAGE_TAG="${{ github.sha }}"
+          
+          cd app
+          docker build -t $IMAGE_NAME:$IMAGE_TAG .
+          docker push $IMAGE_NAME:$IMAGE_TAG
+          
+          # Extract the exact cryptographic digest for Zero Trust signing
+          IMAGE_DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' $IMAGE_NAME:$IMAGE_TAG)
+          echo "IMAGE_DIGEST=$IMAGE_DIGEST" >> $GITHUB_ENV
+
       - name: Cryptographically Sign Software Artifact
         if: steps.build_step.outcome == 'success'
         run: |
-          echo "🔐 Dependencies Verified. Generating verifiable identity signature..."
-          echo "✅ Provenance Artifact Successfully Signed!"
+          # Keyless signing via GitHub OIDC token
+          cosign sign --yes ${{ env.IMAGE_DIGEST }}
+          echo "✅ Provenance Artifact Successfully Signed and Pushed to GHCR!"
 
   secure-deploy:
     needs: secure-build
