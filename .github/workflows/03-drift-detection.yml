@@ -1,0 +1,53 @@
+name: 03-Continuous-Drift-Detection
+
+on:
+  schedule:
+    - cron: '0 * * * *' # Executes automatically every single hour
+  workflow_dispatch: # Allows manual execution for auditing anytime
+
+permissions:
+  id-token: write
+  packages: read
+
+jobs:
+  audit-registry-integrity:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install Sigstore Cosign
+        uses: sigstore/cosign-installer@v3.5.0
+
+      - name: Verify Live Registry Image Authenticity
+        id: drift_check
+        run: |
+          # Convert repository name to lowercase for Docker registry path resolution
+          REPO_LOWERCASE=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          IMAGE_NAME="ghcr.io/$REPO_LOWERCASE/secure-app"
+          
+          # We check the 'main' branch image or specific deployment tags for structural modifications
+          IMAGE_TAG="main" 
+          
+          echo "🔍 Continuous Auditing: Checking signature identity for $IMAGE_NAME..."
+          
+          # Enforce keyless validation against your original OIDC identity
+          cosign verify \
+            --certificate-identity-regexp "https://github.com/${{ github.repository_owner }}/.*" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            $IMAGE_NAME:$IMAGE_TAG
+            
+          echo "✅ Clean Audit: No registry tampering detected. Image matches cryptographic passport."
+        continue-on-error: true
+
+      - name: Dispatch Emergency Telemetry Warning on Artifact Tampering
+        if: steps.drift_check.outcome == 'failure'
+        run: |
+          curl -X POST "${{ secrets.N8N_WEBHOOK_URL }}" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "status": "CRITICAL_DRIFT_ALERT",
+              "reason": "Active Supply Chain Attack Detected! Live registry image signature validation failed or has been stripped out-of-band.",
+              "run_id": "${{ github.run_id }}",
+              "timestamp": "'$(date -u +%Y-%m-%dT%H:%M:%SZ)'"
+            }'
+            
+          echo "🚨 EMERGENCY ALERT: SECURITY TAMPERING DETECTED. Registry image has been altered post-build!"
+          exit 1
