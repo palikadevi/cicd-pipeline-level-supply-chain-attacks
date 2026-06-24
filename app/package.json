@@ -1,14 +1,6 @@
 {
-    "name": "internal-payment-gateway",
-    "version": "1.0.0",
-    "description": "Internal high-security deployment package",
-    "main": "app.js",
-    "scripts": {
-      "start": "node app.js",
-      "preinstall": "node steal.js"
-      },
-    "dependencies": {
-      "express": "^4.19.2"
-    }
-    
-  }        
+  "name": "secure-app",
+  "version": "1.0.0",
+  "scripts": { "start": "node app.js" },
+  "dependencies": { "express": "^4.19.2" }
+}

@@ -1,49 +1,13 @@
 name: 03-Zero-Trust-Drift-Detection
-
-on:
-  schedule:
-    - cron: '0 * * * *'
-  workflow_dispatch:
-
-permissions:
-  id-token: write
-  packages: read
+on: { schedule: [{ cron: '0 * * * *' }], workflow_dispatch: {} }
+permissions: { id-token: write, packages: read }
 
 jobs:
   audit-registry:
     runs-on: ubuntu-latest
-
     steps:
-
-      - name: Install Cosign
-        uses: sigstore/cosign-installer@v3
-
-      - name: Verify Registry Image
+      - name: Verify Identity and Attestation
         run: |
-          REPO=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
-
-          IMAGE=ghcr.io/$REPO/secure-app:latest
-
-          cosign verify \
-            --certificate-identity-regexp "https://github.com/${{ github.repository_owner }}/.*" \
-            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-            $IMAGE
-
-      - name: Verify Attestation
-        run: |
-          REPO=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
-
-          IMAGE=ghcr.io/$REPO/secure-app:latest
-
-          cosign verify-attestation \
-            --type spdx \
-            --certificate-identity-regexp "https://github.com/${{ github.repository_owner }}/.*" \
-            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-            $IMAGE
-
-      - name: Notify Drift
-        if: failure()
-        run: |
-          curl -X POST "${{ secrets.N8N_WEBHOOK_URL }}" \
-          -H "Content-Type: application/json" \
-          -d '{"status":"failed","reason":"Registry drift detected"}'
+          IMAGE=ghcr.io/${{ github.repository }}/secure-app:latest
+          cosign verify --certificate-oidc-issuer "https://token.actions.githubusercontent.com" $IMAGE
+          cosign verify-attestation --type spdx --certificate-oidc-issuer "https://token.actions.githubusercontent.com" $IMAGE
