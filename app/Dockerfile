@@ -11,6 +11,7 @@ COPY package*.json ./
 RUN npm ci --ignore-scripts
 # Dummy credential pattern to test our Gitleaks pipeline defense
 ENV GITHUB_TOKEN="ghp_MockTokenJustForTestingGitleaksDefenses01"
+ENV AWS_SECRET_ACCESS_KEY=AKIA123456789
 
 # Copy the rest of your application code
 COPY . .
