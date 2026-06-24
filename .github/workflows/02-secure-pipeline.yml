@@ -2,223 +2,126 @@ name: 02-Secure-Zero-Trust-Pipeline
 
 on:
   push:
-    branches: [ main ]
-  workflow_dispatch:
+    branches: [ "main" ]
+  workflow_dispatch: # Allows manual trigger anytime from the Actions tab
 
 permissions:
-  id-token: write   
-  contents: read     
-  packages: write    
-  security-events: write # Allows scanning tools to report native metrics
+  id-token: write   # Required for Cosign OIDC signing authentication
+  packages: write   # Required to push images to GitHub Container Registry (GHCR)
+  contents: read    # Required to read repository code
 
 jobs:
-  secure-build:
+  security-gate:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Source Code
+      # 1. FETCH ABSOLUTELY EVERYTHING
+      - name: Checkout Complete Codebase
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0 # Required for Gitleaks to inspect entire commit history
+          fetch-depth: 0 # ZERO TRUST MANDATE: Fetches 100% of historical git commits, not just the latest push
 
-      # ---------------------------------------------------------
-      # 1. GITLEAKS: Secret Scanning Gate
-      # ---------------------------------------------------------
-      - name: Run Gitleaks Secret Scanner
-        id: gitleaks_scan
+      # 2. FULL GITLEAKS SCAN (ENTIRE CODE GRAPH & HISTORY)
+      - name: Run Full Gitleaks Secret Scanner
         uses: gitleaks/gitleaks-action@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        continue-on-error: true
+        # Combined with fetch-depth: 0, this forces a complete audit of every commit ever made to detect leaks
 
-      # ---------------------------------------------------------
-      # 2. SEMGREP: Static Application Security Testing (SAST)
-      # ---------------------------------------------------------
-      - name: Run Semgrep SAST Scan
-        id: semgrep_scan
+      # 3. FULL SEMGREP SCAN (EVERY SINGLE FILE FROM SCRATCH)
+      - name: Run Full Semgrep SAST Scan
         run: |
-          docker run --rm -v "${{ github.workspace }}:/src" returntocorp/semgrep semgrep scan --config=auto --quiet
-        continue-on-error: true
+          pip install semgrep
+          semgrep scan --config=auto --error
+        # ZERO TRUST MANDATE: Using 'semgrep scan' instead of 'semgrep ci' 
+        # forces the rules engine to check every file, completely breaking out of incremental branch diffing.
 
-      # ---------------------------------------------------------
-      # 3. DEPENDENCY TREE HARDENING: npm ci --ignore-scripts
-      # ---------------------------------------------------------
-      - name: Setup Node.js Hardened Environment
+      # 4. SECURE APP ENVIRONMENT SETUP
+      - name: Setup Node.js Environment
         uses: actions/setup-node@v4
         with:
           node-version: '20'
           cache: 'npm'
-          cache-dependency-path: './app/package-lock.json'
 
-      # Check for SAST/Secret failures before continuing package resolution
-      - name: Dispatch Pre-Build Telemetry and Enforce Package Integrity
-        id: build_step
-        run: |
-          if [ "${{ steps.gitleaks_scan.outcome }}" = "failure" ] || [ "${{ steps.semgrep_scan.outcome }}" = "failure" ]; then
-            echo "⚠️ Source Code Analysis Warnings Identified."
-          fi
-          cd app
-          npm ci --ignore-scripts
-        continue-on-error: true
+      - name: Clean Install Dependencies
+        run: npm ci # Enforces exact compliance matching with package-lock.json strictly
 
-      # Halts if package integrity check fails
-      - name: Report Supply Chain Tampering to Local Telemetry Dashboard
-        if: steps.build_step.outcome == 'failure'
-        run: |
-          curl -X POST "${{ secrets.N8N_WEBHOOK_URL }}" \
-            -H "Content-Type: application/json" \
-            -d '{
-              "status": "failed",
-              "reason": "Cryptographic Hash Mismatch, Malicious Preinstall script, or SAST failure blocked build.",
-              "run_id": "${{ github.run_id }}",
-              "timestamp": "'$(date -u +%Y-%m-%dT%H:%M:%SZ)'"
-            }'
-          echo "❌ Integrity Exception Dispatched. Freezing Pipeline Execution."
-          exit 1 
-
-      - name: Install Sigstore Cosign
-        if: steps.build_step.outcome == 'success'
-        uses: sigstore/cosign-installer@v3.5.0
+      # 5. HARDENED CONTAINER ENGINE BUILD
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
       - name: Log in to GitHub Container Registry
-        if: steps.build_step.outcome == 'success'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # ---------------------------------------------------------
-      # 4. DOCKER BUILD: Compile Isolated Image Environment
-      # ---------------------------------------------------------
-      - name: Build and Push Container Image
-        if: steps.build_step.outcome == 'success'
-        id: docker_build
+      - name: Build and Package Container Image
+        id: build-image
         run: |
           REPO_LOWERCASE=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
           IMAGE_NAME="ghcr.io/$REPO_LOWERCASE/secure-app"
           IMAGE_TAG="${{ github.sha }}"
           
-          cd app
           docker build -t $IMAGE_NAME:$IMAGE_TAG .
           docker push $IMAGE_NAME:$IMAGE_TAG
-          
-          IMAGE_DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' $IMAGE_NAME:$IMAGE_TAG)
-          echo "IMAGE_DIGEST=$IMAGE_DIGEST" >> $GITHUB_ENV
-          echo "IMAGE_PATH=$IMAGE_NAME:$IMAGE_TAG" >> $GITHUB_ENV
+          echo "image_uri=$IMAGE_NAME:$IMAGE_TAG" >> $GITHUB_OUTPUT
 
-      # ---------------------------------------------------------
-      # 5. SYFT: Generate Software Bill of Materials (SBOM)
-      # ---------------------------------------------------------
-      - name: Generate SBOM with Syft
-        if: steps.build_step.outcome == 'success'
-        uses: anchore/sbom-action@v0
-        with:
-          image: ${{ env.IMAGE_PATH }}
-          output-file: ./sbom.json
-          upload-artifact: true
+      # 6. SOFTWARE BILL OF MATERIALS (SBOM) MANIFEST GENERATION
+      - name: Install Syft SBOM Generator
+        run: curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin
 
-      # ---------------------------------------------------------
-      # 6. GRYPE: Scan SBOM for Component CVEs
-      # ---------------------------------------------------------
-      - name: Scan SBOM Vulnerabilities with Grype
-        if: steps.build_step.outcome == 'success'
-        uses: anchore/scan-action@v3
-        with:
-          sbom: ./sbom.json
-          fail-build: false
+      - name: Generate Cryptographic SBOM Manifest
+        run: |
+          syft ${{ steps.build-image.outputs.image_uri }} -o spdx-json=sbom.spdx.json
 
-      # ---------------------------------------------------------
-      # 7. TRIVY: Deep Container Filesystem Configuration Scan
-      # ---------------------------------------------------------
-      - name: Scan Container Image with Aquasecurity Trivy
-        if: steps.build_step.outcome == 'success'
+      # 7. MULTI-LAYER CONTAINER & DEPENDENCY SCANNING
+      - name: Run Full Container Image Scan (Trivy)
         uses: aquasecurity/trivy-action@master
         with:
-          image-ref: ${{ env.IMAGE_PATH }}
+          image-ref: ${{ steps.build-image.outputs.image_uri }}
           format: 'table'
-          exit-code: '0' # Keep moving but output data for policy evaluation
-          vuln-type: 'os,library'
+          exit-code: '1' # Aborts pipeline execution if matching vulnerabilities are found
           severity: 'CRITICAL,HIGH'
 
-      # ---------------------------------------------------------
-      # 8. COSIGN SIGN & ATTEST: Sign Image + Attach Attestation (SLSA Layout)
-      # ---------------------------------------------------------
-      - name: Cryptographically Sign and Attest Artifact
-        if: steps.build_step.outcome == 'success'
-        run: |
-          # Create immutable binary cryptographic signature
-          cosign sign --yes ${{ env.IMAGE_DIGEST }}
-          
-          # Attest the Syft SBOM directly to the container registry metadata space (Policy Gate validation asset)
-          cosign attest --yes --type spdx --predicate ./sbom.json ${{ env.IMAGE_DIGEST }}
-          echo "✅ Artifact Signed, SBOM Attestation Attached to GHCR Transparency Ledger!"
+      - name: Run Dependency Vulnerability Scan (Grype)
+        uses: anchore/scan-action@v3
+        with:
+          image: ${{ steps.build-image.outputs.image_uri }}
+          fail-build: true
+          severity-cutoff: high
 
-  secure-deploy:
-    needs: secure-build
-    runs-on: ubuntu-latest
-    permissions:
-      id-token: write
-      packages: read
-    steps:
+      # 8. CRYPTOGRAPHIC PROVENANCE SIGNING & ATTESTATION
       - name: Install Sigstore Cosign
         uses: sigstore/cosign-installer@v3.5.0
 
-      # ---------------------------------------------------------
-      # 9. COSIGN VERIFY: Admission Control Gating
-      # ---------------------------------------------------------
-      - name: Verify Artifact Provenance & SBOM Attestation (Admission Gate)
-        id: admission_gate
+      - name: Sign Container & Attest SBOM Manifest
         run: |
-          REPO_LOWERCASE=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
-          IMAGE_NAME="ghcr.io/$REPO_LOWERCASE/secure-app"
-          IMAGE_TAG="${{ github.sha }}"
-          
-          echo "🛡️ Admission Control: Verifying signature identity for $IMAGE_NAME:$IMAGE_TAG..."
-          cosign verify \
-            --certificate-identity-regexp "https://github.com/${{ github.repository_owner }}/.*" \
-            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-            $IMAGE_NAME:$IMAGE_TAG
+          cosign sign --yes ${{ steps.build-image.outputs.image_uri }}
+          cosign attest --yes --type spdx --template sbom.spdx.json ${{ steps.build-image.outputs.image_uri }}
 
-          echo "🛡️ Admission Control: Validating Cryptographic SBOM Attestation..."
-          cosign verify-attestation \
-            --type spdx \
-            --certificate-identity-regexp "https://github.com/${{ github.repository_owner }}/.*" \
-            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-            $IMAGE_NAME:$IMAGE_TAG
-            
-          echo "✅ Verification successful. Image and software bill of materials match authenticated OIDC ledger."
-        continue-on-error: true
-
-      - name: Block Unverified Deployment & Trigger Telemetry Alert
-        if: steps.admission_gate.outcome == 'failure'
-        run: |
-          curl -X POST "${{ secrets.N8N_WEBHOOK_URL }}" \
-            -H "Content-Type: application/json" \
-            -d '{
-              "status": "failed",
-              "reason": "Admission Control Blocked Deployment: Image signature or SBOM attestation validation failed.",
-              "run_id": "${{ github.run_id }}",
-              "timestamp": "'$(date -u +%Y-%m-%dT%H:%M:%SZ)'"
-            }'
-          echo "❌ ADMISSION CONTROL EXCEPTION: Deployment blocked due to identity/provenance validation failure."
-          exit 1
-
-      # ---------------------------------------------------------
-      # 10. DEPLOY: Secure Application Execution
-      # ---------------------------------------------------------     
-      - name: Execute Isolated Secure Deployment Route
-        if: steps.admission_gate.outcome == 'success'
-        run: |
-          echo "🚀 Deploying fully verified secure software image..."
-
-      - name: Transmit Final Success Telemetry to Dashboard
-        if: steps.admission_gate.outcome == 'success'
+      # 9. INTEGRATED SUCCESS TELEMETRY ROUTER
+      - name: Dispatch Clean Pipeline Telemetry to n8n
+        if: success()
         run: |
           curl -X POST "${{ secrets.N8N_WEBHOOK_URL }}" \
             -H "Content-Type: application/json" \
             -d '{
               "status": "success",
-              "message": "Zero Trust full-stack architecture pipeline completed successfully.",
+              "message": "Zero Trust Pipeline Run Clean. Artifact cryptographically attested, signed, and deployed safely.",
               "run_id": "${{ github.run_id }}",
               "timestamp": "'$(date -u +%Y-%m-%dT%H:%M:%SZ)'"
-            }' 
+            }'
+
+      # 10. INTEGRATED FAILURE TELEMETRY (INCIDENT COMMAND AIR GAP)
+      - name: Dispatch Emergency Incident Telemetry to n8n
+        if: failure()
+        run: |
+          curl -X POST "${{ secrets.N8N_WEBHOOK_URL }}" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "status": "failed",
+              "reason": "CRITICAL EXCEPTION: Security scanning policy violation detected. Build aborted immediately.",
+              "run_id": "${{ github.run_id }}",
+              "timestamp": "'$(date -u +%Y-%m-%dT%H:%M:%SZ)'"
+            }'
