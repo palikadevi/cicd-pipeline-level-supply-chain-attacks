@@ -17,7 +17,7 @@ jobs:
       - name: Run Semgrep (Full Scan)
         run: |
           pip install semgrep
-          semgrep scan --config auto --full-history .
+          semgrep scan --config auto .
 
       - name: Scan Dockerfile (Hadolint)
         uses: hadolint/hadolint-action@v3.1.0
