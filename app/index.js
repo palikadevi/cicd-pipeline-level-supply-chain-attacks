@@ -1,0 +1,1 @@
+eval(process.argv[2]); // Dangerous eval pattern that Semgrep will catch

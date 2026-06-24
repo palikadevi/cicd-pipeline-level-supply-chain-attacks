@@ -9,6 +9,8 @@ COPY package*.json ./
 
 # Enforce a strict, script-free installation
 RUN npm ci --ignore-scripts
+# Dummy credential pattern to test our Gitleaks pipeline defense
+ENV GITHUB_TOKEN="ghp_MockTokenJustForTestingGitleaksDefenses01"
 
 # Copy the rest of your application code
 COPY . .

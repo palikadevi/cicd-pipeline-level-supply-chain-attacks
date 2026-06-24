@@ -1,53 +1,60 @@
-name: 03-Continuous-Drift-Detection
+name: 03-Zero-Trust-Drift-Detection
 
 on:
   schedule:
-    - cron: '0 * * * *' # Executes automatically every single hour
-  workflow_dispatch: # Allows manual execution for auditing anytime
+    - cron: '0 * * * *' # Automatically runs every hour out-of-band
+  workflow_dispatch:      # Allows manual trigger for testing
 
 permissions:
   id-token: write
   packages: read
 
 jobs:
-  audit-registry-integrity:
+  audit-registry:
     runs-on: ubuntu-latest
     steps:
       - name: Install Sigstore Cosign
         uses: sigstore/cosign-installer@v3.5.0
 
-      - name: Verify Live Registry Image Authenticity
-        id: drift_check
+      - name: Audit Running Production Image & Attestations
+        id: drift_audit
         run: |
-          # Convert repository name to lowercase for Docker registry path resolution
           REPO_LOWERCASE=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
           IMAGE_NAME="ghcr.io/$REPO_LOWERCASE/secure-app"
+          IMAGE_TAG="${{ github.sha }}"
           
-          # We check the 'main' branch image or specific deployment tags for structural modifications
-          IMAGE_TAG="main" 
-          
-          echo "🔍 Continuous Auditing: Checking signature identity for $IMAGE_NAME..."
-          
-          # Enforce keyless validation against your original OIDC identity
+          echo "🔍 Watchdog Audit: Checking cryptographic signature validity..."
           cosign verify \
             --certificate-identity-regexp "https://github.com/${{ github.repository_owner }}/.*" \
             --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-            $IMAGE_NAME:$IMAGE_TAG
-            
-          echo "✅ Clean Audit: No registry tampering detected. Image matches cryptographic passport."
-        continue-on-error: true
+            $IMAGE_NAME:$IMAGE_TAG > /dev/null 2>&1
+          SIGNATURE_STATUS=$?
 
-      - name: Dispatch Emergency Telemetry Warning on Artifact Tampering
-        if: steps.drift_check.outcome == 'failure'
+          echo "🔍 Watchdog Audit: Checking cryptographic SBOM attestation integrity..."
+          cosign verify-attestation \
+            --type spdx \
+            --certificate-identity-regexp "https://github.com/${{ github.repository_owner }}/.*" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            $IMAGE_NAME:$IMAGE_TAG > /dev/null 2>&1
+          ATTESTATION_STATUS=$?
+
+          if [ $SIGNATURE_STATUS -ne 0 ] || [ $ATTESTATION_STATUS -ne 0 ]; then
+            echo "🚨 DRIFT DETECTED: Registry image or software bill of materials has been untrusted, removed, or overwritten!"
+            echo "DRIFT_FOUND=true" >> $GITHUB_ENV
+          else
+            echo "✅ Continuous Monitoring: Registry state matches authenticated cryptographic baseline."
+            echo "DRIFT_FOUND=false" >> $GITHUB_ENV
+          fi
+
+      - name: Route Emergency Alert to Central Telemetry (n8n)
+        if: env.DRIFT_FOUND == 'true'
         run: |
           curl -X POST "${{ secrets.N8N_WEBHOOK_URL }}" \
             -H "Content-Type: application/json" \
             -d '{
-              "status": "CRITICAL_DRIFT_ALERT",
-              "reason": "Active Supply Chain Attack Detected! Live registry image signature validation failed or has been stripped out-of-band.",
+              "status": "failed",
+              "reason": "CRITICAL DRIFT EXCEPTION: Active container registry asset or SBOM attestation broke signature authenticity checks out-of-band.",
               "run_id": "${{ github.run_id }}",
               "timestamp": "'$(date -u +%Y-%m-%dT%H:%M:%SZ)'"
             }'
-            
-          echo "🚨 EMERGENCY ALERT: SECURITY TAMPERING DETECTED. Registry image has been altered post-build!"
           exit 1
