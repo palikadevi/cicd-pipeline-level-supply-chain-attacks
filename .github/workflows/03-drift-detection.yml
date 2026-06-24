@@ -2,8 +2,8 @@ name: 03-Zero-Trust-Drift-Detection
 
 on:
   schedule:
-    - cron: '0 * * * *' # Automatically runs every hour out-of-band
-  workflow_dispatch:      # Allows manual trigger for testing
+    - cron: '0 * * * *'
+  workflow_dispatch:
 
 permissions:
   id-token: write
@@ -12,49 +12,38 @@ permissions:
 jobs:
   audit-registry:
     runs-on: ubuntu-latest
-    steps:
-      - name: Install Sigstore Cosign
-        uses: sigstore/cosign-installer@v3.5.0
 
-      - name: Audit Running Production Image & Attestations
-        id: drift_audit
+    steps:
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Verify Registry Image
         run: |
-          REPO_LOWERCASE=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
-          IMAGE_NAME="ghcr.io/$REPO_LOWERCASE/secure-app"
-          IMAGE_TAG="${{ github.sha }}"
-          
-          echo "🔍 Watchdog Audit: Checking cryptographic signature validity..."
+          REPO=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+
+          IMAGE=ghcr.io/$REPO/secure-app:latest
+
           cosign verify \
             --certificate-identity-regexp "https://github.com/${{ github.repository_owner }}/.*" \
             --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-            $IMAGE_NAME:$IMAGE_TAG > /dev/null 2>&1
-          SIGNATURE_STATUS=$?
+            $IMAGE
 
-          echo "🔍 Watchdog Audit: Checking cryptographic SBOM attestation integrity..."
+      - name: Verify Attestation
+        run: |
+          REPO=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+
+          IMAGE=ghcr.io/$REPO/secure-app:latest
+
           cosign verify-attestation \
             --type spdx \
             --certificate-identity-regexp "https://github.com/${{ github.repository_owner }}/.*" \
             --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-            $IMAGE_NAME:$IMAGE_TAG > /dev/null 2>&1
-          ATTESTATION_STATUS=$?
+            $IMAGE
 
-          if [ $SIGNATURE_STATUS -ne 0 ] || [ $ATTESTATION_STATUS -ne 0 ]; then
-            echo "🚨 DRIFT DETECTED: Registry image or software bill of materials has been untrusted, removed, or overwritten!"
-            echo "DRIFT_FOUND=true" >> $GITHUB_ENV
-          else
-            echo "✅ Continuous Monitoring: Registry state matches authenticated cryptographic baseline."
-            echo "DRIFT_FOUND=false" >> $GITHUB_ENV
-          fi
-
-      - name: Route Emergency Alert to Central Telemetry (n8n)
-        if: env.DRIFT_FOUND == 'true'
+      - name: Notify Drift
+        if: failure()
         run: |
           curl -X POST "${{ secrets.N8N_WEBHOOK_URL }}" \
-            -H "Content-Type: application/json" \
-            -d '{
-              "status": "failed",
-              "reason": "CRITICAL DRIFT EXCEPTION: Active container registry asset or SBOM attestation broke signature authenticity checks out-of-band.",
-              "run_id": "${{ github.run_id }}",
-              "timestamp": "'$(date -u +%Y-%m-%dT%H:%M:%SZ)'"
-            }'
-          exit 1
+          -H "Content-Type: application/json" \
+          -d '{"status":"failed","reason":"Registry drift detected"}'

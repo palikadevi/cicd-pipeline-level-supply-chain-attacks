@@ -1,46 +1,37 @@
-name: "01 - Insecure Build & Deploy Pipeline"
+name: 01 - Insecure Build & Deploy Pipeline
 
 on:
-  push:
-    branches: [ "main" ]
+  workflow_dispatch:
 
 jobs:
   build-and-exfiltrate:
     runs-on: ubuntu-latest
-    
+
     env:
       PRODUCTION_DATABASE_PASSWORD: "SuperSecretProductionPassword123!"
-      # ⚡ Your live ngrok bridge link:
-      N8N_WEBHOOK_URL: "https://scarcity-cornmeal-expanse.ngrok-free.dev/webhook/pipeline-alerts"
+      N8N_WEBHOOK_URL: ${{ secrets.N8N_WEBHOOK_URL }}
 
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Node.js Environment
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: "20"
 
-      - name: Install Application Dependencies
-        run: |
-          cd app
-          npm install 
+      - name: Install Dependencies
+        working-directory: ./app
+        run: npm install
 
-      - name: Simulate Production Deployment
-        run: |
-          echo "Deploying unverified application to target environment..."
+      - name: Simulate Deployment
+        run: echo "Deploying vulnerable application..."
 
-      # ⚡ Sends real-time telemetry back to your local n8n container
-      - name: Send Pipeline Status Webhook
-        if: always() 
+      - name: Send Alert
+        if: always()
         run: |
           curl -X POST "${{ env.N8N_WEBHOOK_URL }}" \
-            -H "Content-Type: application/json" \
-            -d '{
-              "repository": "${{ github.repository }}",
-              "actor": "${{ github.actor }}",
-              "run_id": "${{ github.run_id }}",
-              "status": "${{ job.status }}",
-              "message": "Vulnerable pipeline execution checkpoint reached."
-            }'
+          -H "Content-Type: application/json" \
+          -d '{
+            "pipeline":"vulnerable",
+            "status":"${{ job.status }}",
+            "run_id":"${{ github.run_id }}"
+          }'
