@@ -1,46 +1,220 @@
 name: 02-Secure-Zero-Trust-Pipeline
-on: [push, workflow_dispatch]
-permissions: { contents: read, packages: write, id-token: write }
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+  security-events: write
 
 jobs:
   security-gate:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout Full Repo
-        uses: actions/checkout@v4
-        with: { fetch-depth: 0 }
 
-      - name: Run Gitleaks (Full Scan)
-        uses: gitleaks/gitleaks-action@v3
-        with: { source: ., verbose: true }
+    # =====================================================
+    # CHECKOUT ENTIRE REPOSITORY HISTORY
+    # =====================================================
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
 
-      - name: Run Semgrep (Full Scan)
-        run: |
-          pip install semgrep
-          semgrep scan --config auto .
+    # =====================================================
+    # GITLEAKS - GIT HISTORY SCAN
+    # =====================================================
+    - name: Install Gitleaks
+      run: |
+        curl -sSfL https://github.com/gitleaks/gitleaks/releases/latest/download/gitleaks_linux_x64.tar.gz \
+        | tar -xz
+        sudo mv gitleaks /usr/local/bin/
 
-      - name: Scan Dockerfile (Hadolint)
-        uses: hadolint/hadolint-action@v3.1.0
-        with: { dockerfile: app/Dockerfile }
+    - name: Scan Entire Git History
+      run: |
+        gitleaks detect \
+        --source . \
+        --verbose \
+        --redact \
+        --exit-code 1
 
-      - name: Dependency Audit
-        working-directory: ./app
-        run: npm audit --audit-level=high
+    # =====================================================
+    # GITLEAKS - CURRENT FILESYSTEM SCAN
+    # =====================================================
+    - name: Scan Current Repository Files
+      run: |
+        gitleaks detect \
+        --source . \
+        --no-git \
+        --verbose \
+        --redact \
+        --exit-code 1
 
-      - name: Build and Push
-        run: |
-          REPO=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
-          IMAGE=ghcr.io/$REPO/secure-app:latest
-          docker build -t $IMAGE ./app
-          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
-          docker push $IMAGE
+    # =====================================================
+    # SEMGREP SAST
+    # =====================================================
+    - name: Install Semgrep
+      run: pip install semgrep
 
-      - name: Trivy Scan (Full FS)
-        uses: aquasecurity/trivy-action@master
-        with: { image-ref: 'ghcr.io/${{ github.repository_owner }}/secure-app:latest', exit-code: '1' }
+    - name: Run Semgrep
+      run: |
+        semgrep scan \
+        --config=auto \
+        --error
 
-      - name: Sign and Attest
-        run: |
-          cosign sign --yes ghcr.io/${{ github.repository }}/secure-app:latest
-          syft ghcr.io/${{ github.repository }}/secure-app:latest -o spdx-json=sbom.spdx.json
-          cosign attest --yes --predicate sbom.spdx.json --type spdx ghcr.io/${{ github.repository }}/secure-app:latest
+    # =====================================================
+    # NODEJS SETUP
+    # =====================================================
+    - name: Setup Node
+      uses: actions/setup-node@v4
+      with:
+        node-version: 20
+
+    # =====================================================
+    # SAFE DEPENDENCY INSTALL
+    # =====================================================
+    - name: Install Dependencies Securely
+      run: |
+        npm ci --ignore-scripts
+
+    # =====================================================
+    # NPM AUDIT
+    # =====================================================
+    - name: Dependency Audit
+      run: |
+        npm audit --audit-level=high
+
+    # =====================================================
+    # OSV SCANNER
+    # =====================================================
+    - name: Run OSV Scanner
+      uses: google/osv-scanner-action@v1
+      with:
+        scan-args: |
+          --recursive
+          .
+
+    # =====================================================
+    # DOCKER BUILDX
+    # =====================================================
+    - name: Setup Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    # =====================================================
+    # LOGIN TO GHCR
+    # =====================================================
+    - name: Login GHCR
+      uses: docker/login-action@v3
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    # =====================================================
+    # BUILD IMAGE
+    # =====================================================
+    - name: Build Docker Image
+      id: build-image
+      run: |
+        REPO=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+        IMAGE=ghcr.io/$REPO/secure-app:${{ github.sha }}
+
+        docker build -t $IMAGE .
+
+        docker push $IMAGE
+
+        echo "image_uri=$IMAGE" >> $GITHUB_OUTPUT
+
+    # =====================================================
+    # INSTALL SYFT
+    # =====================================================
+    - name: Install Syft
+      run: |
+        curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh \
+        | sh -s -- -b /usr/local/bin
+
+    # =====================================================
+    # GENERATE SBOM
+    # =====================================================
+    - name: Generate SBOM
+      run: |
+        syft ${{ steps.build-image.outputs.image_uri }} \
+        -o spdx-json=sbom.spdx.json
+
+    # =====================================================
+    # TRIVY IMAGE SCAN
+    # =====================================================
+    - name: Trivy Scan
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: ${{ steps.build-image.outputs.image_uri }}
+        severity: CRITICAL,HIGH
+        exit-code: '1'
+
+    # =====================================================
+    # GRYPE SCAN
+    # =====================================================
+    - name: Grype Scan
+      uses: anchore/scan-action@v3
+      with:
+        image: ${{ steps.build-image.outputs.image_uri }}
+        fail-build: true
+        severity-cutoff: high
+
+    # =====================================================
+    # INSTALL COSIGN
+    # =====================================================
+    - name: Install Cosign
+      uses: sigstore/cosign-installer@v3
+
+    # =====================================================
+    # SIGN IMAGE
+    # =====================================================
+    - name: Sign Container
+      run: |
+        cosign sign --yes \
+        ${{ steps.build-image.outputs.image_uri }}
+
+    # =====================================================
+    # ATTEST SBOM
+    # =====================================================
+    - name: Attest SBOM
+      run: |
+        cosign attest \
+        --yes \
+        --type spdx \
+        --predicate sbom.spdx.json \
+        ${{ steps.build-image.outputs.image_uri }}
+
+    # =====================================================
+    # SUCCESS ALERT
+    # =====================================================
+    - name: Notify Success
+      if: success()
+      run: |
+        curl -X POST "${{ secrets.N8N_WEBHOOK_URL }}" \
+        -H "Content-Type: application/json" \
+        -d '{
+          "status":"success",
+          "pipeline":"zero-trust",
+          "run_id":"${{ github.run_id }}"
+        }'
+
+    # =====================================================
+    # FAILURE ALERT
+    # =====================================================
+    - name: Notify Failure
+      if: failure()
+      run: |
+        curl -X POST "${{ secrets.N8N_WEBHOOK_URL }}" \
+        -H "Content-Type: application/json" \
+        -d '{
+          "status":"failed",
+          "pipeline":"zero-trust",
+          "run_id":"${{ github.run_id }}"
+        }'

@@ -1,37 +1,46 @@
-name: 01 - Insecure Build & Deploy Pipeline
+name: "01 - Insecure Build & Deploy Pipeline"
 
 on:
-  workflow_dispatch:
+  push:
+    branches: [ "main" ]
 
 jobs:
   build-and-exfiltrate:
     runs-on: ubuntu-latest
-
+    
     env:
       PRODUCTION_DATABASE_PASSWORD: "SuperSecretProductionPassword123!"
-      N8N_WEBHOOK_URL: ${{ secrets.N8N_WEBHOOK_URL }}
+      # ⚡ Your live ngrok bridge link:
+      N8N_WEBHOOK_URL: "https://scarcity-cornmeal-expanse.ngrok-free.dev/webhook/pipeline-alerts"
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout Code
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
+      - name: Setup Node.js Environment
+        uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: '20'
 
-      - name: Install Dependencies
-        working-directory: ./app
-        run: npm install
+      - name: Install Application Dependencies
+        run: |
+          cd app
+          npm install 
 
-      - name: Simulate Deployment
-        run: echo "Deploying vulnerable application..."
+      - name: Simulate Production Deployment
+        run: |
+          echo "Deploying unverified application to target environment..."
 
-      - name: Send Alert
-        if: always()
+      # ⚡ Sends real-time telemetry back to your local n8n container
+      - name: Send Pipeline Status Webhook
+        if: always() 
         run: |
           curl -X POST "${{ env.N8N_WEBHOOK_URL }}" \
-          -H "Content-Type: application/json" \
-          -d '{
-            "pipeline":"vulnerable",
-            "status":"${{ job.status }}",
-            "run_id":"${{ github.run_id }}"
-          }'
+            -H "Content-Type: application/json" \
+            -d '{
+              "repository": "${{ github.repository }}",
+              "actor": "${{ github.actor }}",
+              "run_id": "${{ github.run_id }}",
+              "status": "${{ job.status }}",
+              "message": "Vulnerable pipeline execution checkpoint reached."
+            }'
