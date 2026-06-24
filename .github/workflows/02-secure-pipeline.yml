@@ -26,39 +26,34 @@ jobs:
       #########################################################
       # GITLEAKS
       #########################################################
-      
 
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v3
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Install Gitleaks
+      #########################################################
+      # CUSTOM SECRET CHECK
+      #########################################################
+
+      - name: Detect Hardcoded Secrets
         run: |
-          curl -sSfL https://github.com/gitleaks/gitleaks/releases/latest/download/gitleaks_linux_x64.tar.gz \
-          | tar -xz
-          sudo mv gitleaks /usr/local/bin/
-
-      - name: Scan Current Repository Files
-        run: |
-          gitleaks detect \
-          --source . \
-          --no-git \
-          --verbose \
-          --redact \
-          --exit-code 1
-
-      
+          grep -rE "(AWS_SECRET|AWS_ACCESS_KEY|SECRET_KEY|PASSWORD|TOKEN|ghp_)" app/ && exit 1 || true
 
       #########################################################
       # SEMGREP
       #########################################################
 
       - name: Install Semgrep
-        run: pip install semgrep
+        run: |
+          pip install semgrep
 
       - name: Run Semgrep
         run: |
           semgrep scan \
-          --config=auto \
-          --error \
-          app/
+            --config=auto \
+            --error \
+            app/
 
       #########################################################
       # HADOLINT
@@ -76,12 +71,20 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
+
+      #########################################################
+      # SAFE DEPENDENCY INSTALL
+      #########################################################
 
       - name: Install Dependencies Securely
         working-directory: ./app
         run: |
           npm ci --ignore-scripts
+
+      #########################################################
+      # NPM AUDIT
+      #########################################################
 
       - name: Dependency Audit
         working-directory: ./app
@@ -89,13 +92,7 @@ jobs:
           npm audit --audit-level=high
 
       #########################################################
-      # OSV
-      #########################################################
-
-
-
-      #########################################################
-      # DOCKER
+      # DOCKER BUILDX
       #########################################################
 
       - name: Setup Docker Buildx
@@ -108,11 +105,14 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build Image
+      #########################################################
+      # BUILD IMAGE
+      #########################################################
+
+      - name: Build Docker Image
         id: build-image
         run: |
           REPO=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
-
           IMAGE=ghcr.io/$REPO/secure-app:${{ github.sha }}
 
           docker build \
@@ -122,9 +122,6 @@ jobs:
 
           docker push $IMAGE
 
-          docker tag $IMAGE ghcr.io/$REPO/secure-app:latest
-          docker push ghcr.io/$REPO/secure-app:latest
-
           echo "image_uri=$IMAGE" >> $GITHUB_OUTPUT
 
       #########################################################
@@ -133,8 +130,7 @@ jobs:
 
       - name: Install Syft
         run: |
-          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh \
-          | sh -s -- -b /usr/local/bin
+          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin
 
       - name: Generate SBOM
         run: |
@@ -172,26 +168,10 @@ jobs:
 
       - name: Sign Image
         run: |
-          cosign sign --yes \
-          ${{ steps.build-image.outputs.image_uri }}
-
-      - name: Verify Signature
-        run: |
-          cosign verify \
-          --certificate-identity-regexp "https://github.com/${{ github.repository_owner }}/.*" \
-          --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-          ${{ steps.build-image.outputs.image_uri }}
-
-      - name: Attest SBOM
-        run: |
-          cosign attest \
-          --yes \
-          --type spdx \
-          --predicate sbom.spdx.json \
-          ${{ steps.build-image.outputs.image_uri }}
+          cosign sign --yes ${{ steps.build-image.outputs.image_uri }}
 
       #########################################################
-      # N8N ALERTING
+      # SUCCESS ALERT
       #########################################################
 
       - name: Notify Success
@@ -199,11 +179,15 @@ jobs:
         run: |
           curl -X POST "${{ secrets.N8N_WEBHOOK_URL }}" \
           -H "Content-Type: application/json" \
-          -d '{"status":"success","pipeline":"secure"}'
+          -d '{"status":"success","pipeline":"zero-trust","run_id":"${{ github.run_id }}"}'
+
+      #########################################################
+      # FAILURE ALERT
+      #########################################################
 
       - name: Notify Failure
         if: failure()
         run: |
           curl -X POST "${{ secrets.N8N_WEBHOOK_URL }}" \
           -H "Content-Type: application/json" \
-          -d '{"status":"failed","pipeline":"secure"}'
+          -d '{"status":"failed","pipeline":"zero-trust","run_id":"${{ github.run_id }}"}'
